@@ -44,7 +44,7 @@ def sync_rules(df,scheduled):
     return out
 
 st.title('TRAX · Extractor y revisor de bitacoras')
-st.warning('El OCR propone texto. defect_description y resolution_description deben compararse literalmente contra la imagen antes de exportar.')
+st.warning('Pulsa Preparar paginas. Luego selecciona una pagina y pulsa Leer pagina seleccionada. Para el manuscrito, recorta cada bloque y usa Leer recorte.')
 defaults=load_json('defaults.json');scheduled=load_json('scheduled_terms.json')
 with st.sidebar:
     st.header('Archivos maestros')
@@ -64,10 +64,9 @@ if uploads:
         for ix,up in enumerate(ordered):
             imgs=pdf_to_images(up.getvalue(),dpi) if up.name.lower().endswith('.pdf') else [(1,Image.open(io.BytesIO(up.getvalue())).convert('RGB'))]
             for pnum,img in imgs:
-                low=img.copy();low.thumbnail((1800,1800))
-                result=paddle_ocr(low) if engine.startswith('PP') and paddle_available() else tesseract_ocr(low,psm=6,variant='gray')
-                pages.append({'archivo':up.name,'pagina':pnum,'imagen':img,'ocr':result.text,'confianza':result.confidence})
-                records.append(blank_record(up.name,pnum,result.text,valid,defaults,scheduled))
+                preview=img.copy(); preview.thumbnail((1700,1700))
+                pages.append({'archivo':up.name,'pagina':pnum,'imagen':preview,'ocr':'','confianza':0.0})
+                records.append(blank_record(up.name,pnum,'',valid,defaults,scheduled))
             bar.progress((ix+1)/total)
         st.session_state.pages=pages;st.session_state.records=pd.DataFrame(records);st.session_state.selected_page=0
 
@@ -79,6 +78,20 @@ if 'pages' in st.session_state and st.session_state.pages:
     left,right=st.columns([1.05,1])
     with left:
         st.image(page['imagen'],caption=names[idx],use_container_width=True)
+        if st.button('Leer pagina seleccionada',type='primary'):
+            rr=paddle_ocr(page['imagen']) if engine.startswith('PP') and paddle_available() else tesseract_ocr(page['imagen'],psm=6,variant='gray')
+            st.session_state.pages[idx]['ocr']=rr.text; st.session_state.pages[idx]['confianza']=rr.confidence
+            cand=extract_candidate(rr.text); df=st.session_state.records
+            matches=df.index[(df.archivo==page['archivo']) & (df.pagina==page['pagina'])].tolist()
+            if matches:
+                ri=matches[0]
+                for key in ['defect','reported_date','chapter','section']:
+                    if cand.get(key) not in (None,''): df.at[ri,key]=cand[key]
+                if cand.get('reported_date') not in (None,''): df.at[ri,'resolved_date']=cand['reported_date']
+                if cand.get('ac'):
+                    best,score,choices=match_aircraft(cand['ac'],valid); df.at[ri,'ac']=best if score>=85 else cand['ac']; df.at[ri,'alternativas_matricula']=', '.join(choices)
+                df.at[ri,'ocr_pagina']=rr.text; st.session_state.records=df
+            st.rerun()
         st.caption(f"Confianza OCR de pagina: {page['confianza']:.1f}%")
         st.text_area('OCR bruto de pagina',page['ocr'],height=190,disabled=True)
         st.subheader('OCR de recorte')
@@ -90,7 +103,14 @@ if 'pages' in st.session_state and st.session_state.pages:
                 rr=paddle_ocr(crop) if engine.startswith('PP') and paddle_available() else tesseract_ocr(crop,psm=6,variant='adaptive')
                 st.session_state.crop_text=rr.text;st.session_state.crop_conf=rr.confidence
             if 'crop_text' in st.session_state:
-                st.text_area(f"Texto del recorte ({st.session_state.get('crop_conf',0):.1f}%)",st.session_state.crop_text,height=130)
+                st.session_state.crop_text=st.text_area(f"Texto del recorte ({st.session_state.get('crop_conf',0):.1f}%)",st.session_state.crop_text,height=130).upper()
+                b1,b2=st.columns(2)
+                if b1.button('Usar como reporte'):
+                    df=st.session_state.records; matches=df.index[(df.archivo==page['archivo']) & (df.pagina==page['pagina'])].tolist()
+                    if matches: df.at[matches[0],'defect_description']=st.session_state.crop_text; st.session_state.records=df; st.rerun()
+                if b2.button('Usar como accion correctiva'):
+                    df=st.session_state.records; matches=df.index[(df.archivo==page['archivo']) & (df.pagina==page['pagina'])].tolist()
+                    if matches: df.at[matches[0],'resolution_description']=st.session_state.crop_text; st.session_state.records=df; st.rerun()
     with right:
         st.subheader('Transcripcion literal')
         df=st.session_state.records
